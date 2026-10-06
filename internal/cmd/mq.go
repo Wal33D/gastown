@@ -653,10 +653,12 @@ func cleanupMQPostMergeBranch(rigPath string, rigGit mqPostMergeGit, mr *refiner
 		if err != nil {
 			return cleanup, fmt.Errorf("remote branch delete %s: read remote branch tip: %w", cleanup.Branch, err)
 		}
-		if strings.TrimSpace(remoteTip) == "" {
+		tip := strings.TrimSpace(remoteTip)
+		leaseOn := mqPostMergeDeleteLease(rigGit, mr, expectedHead, tip)
+		if tip == "" {
 			cleanup.AlreadyGone = true
-		} else if err := rigGit.DeleteRemoteBranchIfAt("origin", cleanup.Branch, expectedHead); err != nil {
-			return cleanup, fmt.Errorf("remote branch delete %s at %s: %w", cleanup.Branch, expectedHead, err)
+		} else if err := rigGit.DeleteRemoteBranchIfAt("origin", cleanup.Branch, leaseOn); err != nil {
+			return cleanup, fmt.Errorf("remote branch delete %s at %s: %w", cleanup.Branch, leaseOn, err)
 		} else {
 			cleanup.RemoteDeleted = true
 		}
@@ -666,6 +668,25 @@ func cleanupMQPostMergeBranch(rigPath string, rigGit mqPostMergeGit, mr *refiner
 		cleanup.LocalDeleted = true
 	}
 	return cleanup, nil
+}
+
+// mqPostMergeDeleteLease picks the commit the remote delete is leased on. Normally the MR's submitted
+// head; but when the branch was re-pushed after submission (a conflict-resolution task merges main into it
+// and pushes, gs-ltz) and that newer tip is itself contained in the merge target, the tip is the safe lease.
+// A tip that is NOT in the target keeps the submitted head, so the delete is refused and nothing unmerged
+// is lost.
+func mqPostMergeDeleteLease(rigGit mqPostMergeGit, mr *refinery.MergeRequest, expectedHead, tip string) string {
+	if tip == "" || tip == expectedHead || mr == nil {
+		return expectedHead
+	}
+	target := strings.TrimSpace(mr.TargetBranch)
+	if target == "" {
+		return expectedHead
+	}
+	if rigGit.VerifyPushedCommitReachableFromPushTarget("origin", target, tip) == nil {
+		return tip
+	}
+	return expectedHead
 }
 
 func deleteMQPostMergeLocalBranchIfAt(rigGit mqPostMergeGit, branch, expectedHead string) bool {
