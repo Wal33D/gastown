@@ -1650,18 +1650,9 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 		}
 		scheduledSet := areScheduled(trackedIDs)
 
-		var readyIssues []string
-		for _, t := range tracked {
-			if isReadyIssue(t, scheduledSet) {
-				if !isSlingableBead(townBeads, t.ID) {
-					continue
-				}
-				if !convoyops.IsSlingableType(t.IssueType) {
-					continue
-				}
-				readyIssues = append(readyIssues, t.ID)
-			}
-		}
+		readyIssues := readyIssueIDs(tracked, scheduledSet, func(id string) bool {
+			return isSlingableBead(townBeads, id)
+		})
 
 		if len(readyIssues) > 0 {
 			stranded = append(stranded, strandedConvoyInfo{
@@ -1689,6 +1680,31 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 	}
 
 	return stranded, nil
+}
+
+// readyIssueIDs returns the tracked issues a convoy feeder may dispatch.
+func readyIssueIDs(tracked []trackedIssueInfo, scheduledSet map[string]bool, slingable func(string) bool) []string {
+	var ready []string
+	for _, t := range tracked {
+		if !isReadyIssue(t, scheduledSet) || !slingable(t.ID) || !convoyops.IsSlingableType(t.IssueType) {
+			continue
+		}
+		// Finished work waiting in the merge queue has no live worker by design
+		// (the polecat exits after gt done). Re-feeding it spawns a duplicate
+		// polecat on already-submitted work.
+		if issueHasOpenMRFn(t.ID) {
+			continue
+		}
+		ready = append(ready, t.ID)
+	}
+	return ready
+}
+
+// issueHasOpenMRFn reports whether an issue already has an open merge request.
+// Errors read as "no MR" so a beads hiccup never strands a convoy. Overridable in tests.
+var issueHasOpenMRFn = func(issueID string) bool {
+	mrs, err := beads.New(resolveBeadDir(issueID)).FindOpenMRsForIssue(issueID)
+	return err == nil && len(mrs) > 0
 }
 
 // isReadyIssue checks if an issue is ready for dispatch (stranded).
