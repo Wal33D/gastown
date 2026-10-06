@@ -654,6 +654,14 @@ func readySlingContextsFromAssessments(assessments []scheduledContextAssessment)
 		if !assessment.ready {
 			continue
 		}
+		// A prerequisite whose task bead is closed but whose merge request is still open has NOT landed:
+		// task beads close at gt done (submit), so without this a follower dispatched early and sat
+		// holding a slot until the prerequisite merged (three times on 2026-10-06).
+		if dep := dependencyAwaitingMergeFn(assessment.fields.WorkBeadID); dep != "" {
+			fmt.Fprintf(os.Stderr, "%s dispatch_skip reason=dependency_in_merge_queue bead=%s dependency=%s\n",
+				style.Dim.Render("○"), assessment.fields.WorkBeadID, dep)
+			continue
+		}
 		workLabels := assessment.info.Labels
 		if capacity.IsMessagingBead(workLabels) {
 			fmt.Fprintf(os.Stderr, "%s dispatch_skip reason=messaging_label bead=%s labels=%v\n",
@@ -945,4 +953,33 @@ func sortScheduledCandidates(candidates []scheduledContextAssessment, info map[s
 		}
 		return candidates[i].context.issue.ID < candidates[j].context.issue.ID
 	})
+}
+
+// dependencyAwaitingMergeFn returns the id of a closed "blocks" dependency of workBeadID that still has an
+// open merge request, or "" when none does. Lookup errors count as no blocker. Overridable in tests.
+var dependencyAwaitingMergeFn = func(workBeadID string) string {
+	bd := beads.New(resolveBeadDir(workBeadID))
+	issue, err := bd.Show(workBeadID)
+	if err != nil || issue == nil {
+		return ""
+	}
+	return closedDependencyWithOpenMR(issue.Dependencies, func(id string) bool {
+		mrs, err := beads.New(resolveBeadDir(id)).FindOpenMRsForIssue(id)
+		return err == nil && len(mrs) > 0
+	})
+}
+
+func closedDependencyWithOpenMR(deps []beads.IssueDep, hasOpenMR func(string) bool) string {
+	for _, d := range deps {
+		if d.DependencyType != "" && d.DependencyType != "blocks" {
+			continue
+		}
+		if d.Status != "closed" {
+			continue // open/in-progress blockers are already handled by bd's blocked list
+		}
+		if hasOpenMR(d.ID) {
+			return d.ID
+		}
+	}
+	return ""
 }

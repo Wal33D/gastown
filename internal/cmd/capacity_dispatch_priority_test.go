@@ -30,3 +30,19 @@ func TestSortScheduledCandidatesPriorityThenFIFO(t *testing.T) {
 		}
 	}
 }
+
+func TestClosedDependencyWithOpenMR(t *testing.T) {
+	deps := []beads.IssueDep{
+		{ID: "gs-open", Status: "open", DependencyType: "blocks"},
+		{ID: "gs-merged", Status: "closed", DependencyType: "blocks"},
+		{ID: "gs-submitted", Status: "closed", DependencyType: "blocks"},
+		{ID: "gs-parent", Status: "closed", DependencyType: "parent-child"},
+	}
+	open := map[string]bool{"gs-submitted": true, "gs-parent": true}
+	if got := closedDependencyWithOpenMR(deps, func(id string) bool { return open[id] }); got != "gs-submitted" {
+		t.Fatalf("got %q, want gs-submitted", got)
+	}
+	if got := closedDependencyWithOpenMR(deps[:2], func(id string) bool { return open[id] }); got != "" {
+		t.Fatalf("got %q, want none", got)
+	}
+}
