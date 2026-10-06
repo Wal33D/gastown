@@ -189,9 +189,12 @@ func isRoleCommand(cmd *cobra.Command) bool {
 	return false
 }
 
+// isDoneCommand returns true only for the top-level `gt done` tree. Subcommands
+// that happen to be named "done" elsewhere (e.g. `gt dog done`) are not polecat
+// completion and must not hit the polecat ownership guard.
 func isDoneCommand(cmd *cobra.Command) bool {
 	for c := cmd; c != nil; c = c.Parent() {
-		if c.Name() == "done" {
+		if c.Name() == "done" && c.Parent() != nil && !c.Parent().HasParent() {
 			return true
 		}
 	}
