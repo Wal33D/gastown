@@ -111,6 +111,15 @@ func runTapPolecatStop(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	// Auto-submitting is off by default (2026-10-06): after a machine sleep the background verify a polecat
+	// was waiting on is dead, so the old safety net submitted unverified work (three MRs in one minute).
+	// Leave the work for the witness, which already watches for idle polecats with pending work.
+	// GT_POLECAT_STOP_AUTODONE=1 restores the old behaviour.
+	if os.Getenv("GT_POLECAT_STOP_AUTODONE") != "1" {
+		fmt.Fprintf(os.Stderr, "Polecat %s stopped with pending work on %s (%s); not auto-submitting. Run your verify, post the pass line, then gt done.\n", polecatName, branch, reason)
+		return nil
+	}
+
 	// Polecat has pending work! Run gt done as a safety net.
 	fmt.Fprintf(os.Stderr, "\n")
 	fmt.Fprintf(os.Stderr, "⚠️  Polecat %s has pending work on branch %s (%s)\n", polecatName, branch, reason)
