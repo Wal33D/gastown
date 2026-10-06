@@ -475,9 +475,10 @@ func cleanupStaleContexts(townRoot string) error {
 
 // beadStatusInfo holds batch-fetched bead status, title, and labels.
 type beadStatusInfo struct {
-	Status string
-	Title  string
-	Labels []string
+	Status   string
+	Title    string
+	Labels   []string
+	Priority *int // nil when unknown; dispatch treats unknown as P2
 }
 
 func beadStatusInfoFromBeadInfo(info *beadInfo) beadStatusInfo {
@@ -515,19 +516,21 @@ func batchFetchBeadInfoByIDs(townRoot string, ids []string) map[string]beadStatu
 			continue
 		}
 		var items []struct {
-			ID     string   `json:"id"`
-			Status string   `json:"status"`
-			Title  string   `json:"title"`
-			Labels []string `json:"labels"`
+			ID       string   `json:"id"`
+			Status   string   `json:"status"`
+			Title    string   `json:"title"`
+			Labels   []string `json:"labels"`
+			Priority *int     `json:"priority"`
 		}
 		if err := json.Unmarshal(out, &items); err != nil {
 			continue
 		}
 		for _, item := range items {
 			result[item.ID] = beadStatusInfo{
-				Status: item.Status,
-				Title:  item.Title,
-				Labels: item.Labels,
+				Status:   item.Status,
+				Title:    item.Title,
+				Labels:   item.Labels,
+				Priority: item.Priority,
 			}
 		}
 	}
@@ -603,16 +606,11 @@ func assessScheduledContexts(townRoot string) ([]scheduledContextAssessment, err
 		return nil, nil
 	}
 
-	sort.Slice(candidates, func(i, j int) bool {
-		fi := candidates[i].fields
-		fj := candidates[j].fields
-		if fi.EnqueuedAt != fj.EnqueuedAt {
-			return fi.EnqueuedAt < fj.EnqueuedAt
-		}
-		return candidates[i].context.issue.ID < candidates[j].context.issue.ID
-	})
-
 	workBeadInfo := batchFetchBeadInfoByIDs(townRoot, workBeadIDs)
+
+	// Higher-priority work dispatches first (P0 before P4); FIFO within a priority. Before this the
+	// queue was pure FIFO, so bumping an unblocking conflict task to P1 changed nothing.
+	sortScheduledCandidates(candidates, workBeadInfo)
 	blockedWorkIDs, blockedUnknownIDs, blockedErr := listBlockedWorkBeadIDStates(townRoot, workBeadIDs)
 
 	seenWork := make(map[string]bool)
@@ -924,4 +922,27 @@ func isScheduledWorkBeadReady(workBeadID string, info beadStatusInfo, found bool
 		return false
 	}
 	return info.Status == "open"
+}
+
+// sortScheduledCandidates orders scheduled work by its bead's priority (lower number first, unknown
+// as P2), then by enqueue time, then by context id.
+func sortScheduledCandidates(candidates []scheduledContextAssessment, info map[string]beadStatusInfo) {
+	prio := func(c scheduledContextAssessment) int {
+		if bi, ok := info[c.fields.WorkBeadID]; ok && bi.Priority != nil {
+			return *bi.Priority
+		}
+		return 2
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		pi, pj := prio(candidates[i]), prio(candidates[j])
+		if pi != pj {
+			return pi < pj
+		}
+		fi := candidates[i].fields
+		fj := candidates[j].fields
+		if fi.EnqueuedAt != fj.EnqueuedAt {
+			return fi.EnqueuedAt < fj.EnqueuedAt
+		}
+		return candidates[i].context.issue.ID < candidates[j].context.issue.ID
+	})
 }
