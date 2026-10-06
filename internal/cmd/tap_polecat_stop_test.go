@@ -163,3 +163,28 @@ func runPolecatStopTestGit(t *testing.T, dir string, args ...string) {
 		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
 	}
 }
+
+func TestAgentHasBackgroundShells(t *testing.T) {
+	base := "1 0 launchd\n1937 1 tmux\n46029 1937 /Users/x/.local/bin/claude\n64332 46029 caffeinate\n"
+	hookDirect := "64530 46029 /Users/x/.local/bin/gt\n"
+	hookViaShell := "64529 46029 /bin/sh\n64530 64529 /Users/x/.local/bin/gt\n"
+	bgShell := "48023 46029 /bin/zsh\n"
+
+	cases := []struct {
+		name string
+		ps   string
+		want bool
+	}{
+		{"no background work", base + hookDirect, false},
+		{"hook wrapped in sh is not background work", base + hookViaShell, false},
+		{"background shell running", base + hookDirect + bgShell, true},
+		{"background shell with hook wrapped in sh", base + hookViaShell + bgShell, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := agentHasBackgroundShells(parseStopCheckPs(tc.ps), 64530); got != tc.want {
+				t.Fatalf("agentHasBackgroundShells = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

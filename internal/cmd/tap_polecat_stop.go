@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -103,6 +104,13 @@ func runTapPolecatStop(cmd *cobra.Command, args []string) error {
 		return nil // Can't check, or no work to submit — don't block session stop
 	}
 
+	// Claude Code fires Stop at the end of every turn, including a turn that
+	// ends to wait for a background task (e.g. a long verify run). Submitting
+	// then pushes unverified work and kills the session mid-gate.
+	if polecatHasBackgroundShells() {
+		return nil
+	}
+
 	// Polecat has pending work! Run gt done as a safety net.
 	fmt.Fprintf(os.Stderr, "\n")
 	fmt.Fprintf(os.Stderr, "⚠️  Polecat %s has pending work on branch %s (%s)\n", polecatName, branch, reason)
@@ -156,4 +164,73 @@ func polecatStopPendingWork(cloneDir, branch string) (bool, string, error) {
 	}
 
 	return false, "", nil
+}
+
+type stopCheckProc struct {
+	ppid int
+	comm string
+}
+
+// polecatHasBackgroundShells reports whether the agent process that ran this
+// Stop hook still has shell children outside the hook's own process chain —
+// background commands the polecat ended its turn to wait on.
+func polecatHasBackgroundShells() bool {
+	out, err := exec.Command("ps", "-eo", "pid=,ppid=,comm=").Output()
+	if err != nil {
+		return false
+	}
+	return agentHasBackgroundShells(parseStopCheckPs(string(out)), os.Getpid())
+}
+
+func parseStopCheckPs(out string) map[int]stopCheckProc {
+	procs := make(map[int]stopCheckProc)
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		pid, err1 := strconv.Atoi(fields[0])
+		ppid, err2 := strconv.Atoi(fields[1])
+		if err1 != nil || err2 != nil {
+			continue
+		}
+		procs[pid] = stopCheckProc{ppid: ppid, comm: strings.Join(fields[2:], " ")}
+	}
+	return procs
+}
+
+func stopCheckIsShell(comm string) bool {
+	switch strings.TrimPrefix(filepath.Base(comm), "-") {
+	case "sh", "bash", "zsh", "dash", "fish":
+		return true
+	}
+	return false
+}
+
+// agentHasBackgroundShells walks up from self past the hook's gt and shell
+// wrappers to the agent process, then looks for shell children of the agent
+// that are not part of the hook's own chain.
+func agentHasBackgroundShells(procs map[int]stopCheckProc, self int) bool {
+	chain := map[int]bool{self: true}
+	agent := 0
+	for pid := procs[self].ppid; pid > 1; pid = procs[pid].ppid {
+		p, ok := procs[pid]
+		if !ok {
+			return false
+		}
+		chain[pid] = true
+		if base := filepath.Base(p.comm); base != "gt" && !stopCheckIsShell(p.comm) {
+			agent = pid
+			break
+		}
+	}
+	if agent == 0 {
+		return false
+	}
+	for pid, p := range procs {
+		if p.ppid == agent && !chain[pid] && stopCheckIsShell(p.comm) {
+			return true
+		}
+	}
+	return false
 }
