@@ -3289,7 +3289,11 @@ func matchesPromptPrefix(line, readyPromptPrefix string) bool {
 // change is intentional rather than accidental. The idle side is already
 // centralized via the agent presets' ReadyPromptPrefix; this is its busy-side
 // counterpart.
-var busyIndicators = []string{"esc to interrupt"}
+// Grok's CLI never prints "esc to interrupt": while a turn runs its footer shows
+// "Ctrl+c:cancel" and its spinner line ends in "[stop]"; idle, the footer is
+// "Shift+Tab:mode │ Ctrl+x:shortcuts". Without these, every Grok session looked
+// idle and nudges were typed into its composer mid-turn.
+var busyIndicators = []string{"esc to interrupt", "Ctrl+c:cancel", "[stop]"}
 
 func hasBusyIndicator(line string) bool {
 	trimmed := strings.TrimSpace(line)

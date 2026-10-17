@@ -2887,3 +2887,28 @@ func TestValidateCommandBinary(t *testing.T) {
 		})
 	}
 }
+
+// TestBusyIndicatorsGrok pins Grok's busy markers: its TUI never shows "esc to
+// interrupt", so without these every Grok session reads as idle mid-turn.
+func TestBusyIndicatorsGrok(t *testing.T) {
+	t.Parallel()
+	busy := []string{
+		"   ⠦ Waiting for response… 14s                             31m52s ⇣183k [stop]",
+		"  Shift+Tab:mode  │  Ctrl+c:cancel  │  Ctrl+x:shortcuts",
+		"  Enter:send now  │  Shift+Tab:mode  │  Ctrl+c:cancel  │  Ctrl+;:queue  │",
+	}
+	for _, line := range busy {
+		if !hasBusyIndicator(line) {
+			t.Errorf("expected busy for Grok line %q", line)
+		}
+	}
+	idle := []string{
+		"  Shift+Tab:mode  │  Ctrl+x:shortcuts",
+		"  │ ❯                                                                        │",
+	}
+	for _, line := range idle {
+		if hasBusyIndicator(line) {
+			t.Errorf("expected idle for Grok line %q", line)
+		}
+	}
+}
