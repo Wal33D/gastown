@@ -465,6 +465,39 @@ func TestClosedMoleculeStepReapBehavior(t *testing.T) {
 
 var fakeReaperDriverID uint64
 
+func TestAutoCloseExcludesConvoyLabel(t *testing.T) {
+	for _, dryRun := range []bool{true, false} {
+		t.Run(fmt.Sprintf("dryRun=%t", dryRun), func(t *testing.T) {
+			state := &fakeReaperState{ops: make(map[int][]string)}
+			db := openFakeReaperDB(t, state)
+			t.Cleanup(func() { db.Close() })
+
+			result, err := AutoClose(db, "testdb", 30*24*time.Hour, dryRun)
+			if err != nil {
+				t.Fatalf("AutoClose: %v", err)
+			}
+			if result.Closed != 1 || len(result.ClosedEntries) != 1 || result.ClosedEntries[0].ID != "stale-task" {
+				t.Fatalf("expected only the unlabelled task to be selected, got %+v", result)
+			}
+			updates := 0
+			for _, ops := range state.ops {
+				for _, op := range ops {
+					if strings.HasPrefix(op, "EXEC UPDATE `testdb`.issues") {
+						updates++
+					}
+				}
+			}
+			wantUpdates := 1
+			if dryRun {
+				wantUpdates = 0
+			}
+			if updates != wantUpdates {
+				t.Fatalf("got %d updates, want %d", updates, wantUpdates)
+			}
+		})
+	}
+}
+
 func openFakeReaperDB(t *testing.T, state *fakeReaperState) *sql.DB {
 	t.Helper()
 	driverName := fmt.Sprintf("fake_reaper_%d", atomic.AddUint64(&fakeReaperDriverID, 1))
@@ -654,6 +687,17 @@ func (c *fakeReaperConn) QueryContext(_ context.Context, query string, args []dr
 	c.state.record(c.id, "QUERY "+normalized)
 
 	switch {
+	case strings.HasPrefix(normalized, "SELECT i.id, i.title, i.updated_at FROM issues i WHERE"):
+		// Assert label exclusion on the executed query. A convoy can be stored
+		// as a task, so filtering issue_type alone is insufficient.
+		if !strings.Contains(normalized, "i.id NOT IN ( SELECT DISTINCT l.issue_id FROM `testdb`.labels l WHERE l.label IN (") ||
+			!strings.Contains(normalized, "'gt:convoy'") {
+			return nil, fmt.Errorf("auto-close candidate query does not exclude the gt:convoy label: %s", normalized)
+		}
+		return &fakeReaperRows{
+			cols: []string{"id", "title", "updated_at"},
+			rows: [][]driver.Value{{"stale-task", "Stale task", time.Now().Add(-60 * 24 * time.Hour)}},
+		}, nil
 	case strings.Contains(normalized, "SELECT COUNT(*) FROM wisps w") && strings.Contains(normalized, "created_at <"):
 		if err := validateStaleWispQuery(normalized); err != nil {
 			return nil, err
@@ -694,6 +738,11 @@ func (c *fakeReaperConn) ExecContext(_ context.Context, query string, args []dri
 	c.state.record(c.id, "EXEC "+normalized)
 
 	switch {
+	case strings.HasPrefix(normalized, "UPDATE `testdb`.issues SET status = 'closed'"):
+		if len(args) != 1 || args[0].Value != "stale-task" {
+			return nil, fmt.Errorf("expected only stale-task to be closed, got %v", args)
+		}
+		return fakeReaperResult(1), nil
 	case strings.HasPrefix(normalized, "UPDATE wisps SET status='closed'"):
 		affected := int64(0)
 		for _, arg := range args {
