@@ -16,7 +16,9 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/crew"
+	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/deps"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/git"
@@ -1624,11 +1626,15 @@ func runRigBoot(cmd *cobra.Command, args []string) error {
 	var started []string
 	var skipped []string
 
-	// 1. Start the witness
+	// 1. Start the witness, unless daemon.json switches the witness patrol off.
+	// Polecat dispatch runs `gt rig boot`, so without this check every dispatch
+	// brought a deliberately stopped witness back.
 	// Start() treats healthy sessions as already running and recreates zombie
 	// sessions whose tmux pane remains after the agent exits.
 	witMgr := witness.NewManager(r)
-	if err := witMgr.Start(false, "", nil); err != nil {
+	if !daemon.IsPatrolEnabled(daemon.LoadPatrolConfig(townRoot), constants.RoleWitness) {
+		skipped = append(skipped, "witness (disabled in daemon.json)")
+	} else if err := witMgr.Start(false, "", nil); err != nil {
 		if err == witness.ErrAlreadyRunning {
 			skipped = append(skipped, "witness (already running)")
 		} else {
