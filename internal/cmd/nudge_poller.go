@@ -71,6 +71,20 @@ func runNudgePoller(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("session %q not found", sessionName)
 	}
 
+	// One poller per session. StartPoller's PID-file check is not atomic, so
+	// two concurrent `gt nudge` calls (or a manager restart racing a nudge)
+	// can each launch a poller. Two pollers type into the same TUI on every
+	// interval, doubling the turns the agent spends on nudges. Hold an
+	// exclusive flock for the poller's lifetime and exit if another holds it.
+	unlock, acquired, lockErr := nudge.AcquirePollerLock(townRoot, sessionName)
+	if lockErr != nil {
+		fmt.Fprintf(os.Stderr, "nudge-poller: lock error for %s: %v (continuing)\n", sessionName, lockErr)
+	} else if !acquired {
+		return nil // another poller already serves this session
+	} else {
+		defer unlock()
+	}
+
 	// Resolve nudge options once at startup: if the target agent uses Escape
 	// as cancel (e.g., Gemini CLI), skip the Escape keystroke during delivery
 	// to avoid canceling in-flight generation. (GH#gt-wasn)
@@ -127,21 +141,43 @@ func runNudgePoller(cmd *cobra.Command, args []string) error {
 			if len(drained) == 0 {
 				continue // someone else drained it
 			}
+			// Drop nudges this session already received within the dedupe
+			// window (another drain path, a requeue, or a repeating sender).
+			drained = nudge.DropDuplicates(townRoot, sessionName, drained)
+			if len(drained) == 0 {
+				continue
+			}
 
 			formatted := nudge.FormatForInjection(drained)
-			if err := t.NudgeSessionWithOpts(sessionName, formatted, nudgeOpts); err != nil {
+			err = t.NudgeSessionWithOpts(sessionName, formatted, nudgeOpts)
+			if err != nil {
 				fmt.Fprintf(os.Stderr, "nudge-poller: injection error for %s: %v\n", sessionName, err)
-				// An unverified submit means the text was typed and Enter was sent;
-				// TUIs such as Grok queue input while a turn runs, so the probe
-				// cannot see it leave the composer. Requeueing here retyped the
-				// same nudges every poll interval (hundreds of copies queued in
-				// the agent). Only requeue when delivery itself failed.
-				if !errors.Is(err, tmux.ErrSubmitNotVerified) {
-					requeueDrainedNudges(townRoot, sessionName, "nudge-poller", drained)
-				}
 			}
+			settleDrainedDelivery(townRoot, sessionName, "nudge-poller", drained, err)
 		}
 	}
+}
+
+// nudgeTextTyped reports whether a delivery error (or success) means the
+// nudge text reached the target pane. nil and ErrSubmitNotVerified both mean
+// the text was typed and Enter was sent; TUIs such as Grok queue input while
+// a turn runs, so the submit probe cannot see it leave the composer. Any other
+// error happened before typing (lock timeout, session gone, send-keys failed).
+func nudgeTextTyped(err error) bool {
+	return err == nil || errors.Is(err, tmux.ErrSubmitNotVerified)
+}
+
+// settleDrainedDelivery finishes a drain-and-inject cycle. If the text was
+// typed, the batch is recorded in the delivery ledger and never requeued:
+// requeueing after an unverified submit retyped the same nudges every poll
+// interval (hundreds of copies queued in the agent). Only a delivery that
+// failed before typing is requeued for a later attempt.
+func settleDrainedDelivery(townRoot, sessionName, source string, drained []nudge.QueuedNudge, err error) {
+	if nudgeTextTyped(err) {
+		nudge.RecordDeliveredNudges(townRoot, sessionName, drained)
+		return
+	}
+	requeueDrainedNudges(townRoot, sessionName, source, drained)
 }
 
 func shouldSkipDrainUntilIdle(hasPromptDetection bool, waitErr error) bool {

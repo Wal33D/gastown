@@ -31,6 +31,7 @@ const (
 	DefaultNudgeUrgentTTL         = 2 * time.Hour
 	DefaultNudgeMaxQueueDepth     = 50
 	DefaultNudgeStaleClaimTimeout = 5 * time.Minute
+	DefaultNudgeDedupWindow       = 10 * time.Minute
 )
 
 // Daemon defaults.
@@ -275,6 +276,15 @@ func (n *NudgeThresholds) StaleClaimThresholdD() time.Duration {
 		return ParseDurationOrDefault(n.StaleClaimThreshold, DefaultNudgeStaleClaimTimeout)
 	}
 	return DefaultNudgeStaleClaimTimeout
+}
+
+// DedupWindowD returns the configured or default nudge dedupe window.
+// A zero or negative value disables delivery dedupe.
+func (n *NudgeThresholds) DedupWindowD() time.Duration {
+	if n != nil {
+		return ParseDurationOrDefault(n.DedupWindow, DefaultNudgeDedupWindow)
+	}
+	return DefaultNudgeDedupWindow
 }
 
 // --- Daemon accessors ---

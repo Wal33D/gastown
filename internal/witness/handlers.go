@@ -22,7 +22,9 @@ import (
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/mayor"
+	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -742,12 +744,36 @@ func nudgeRefinery(townRoot, rigName string) error {
 		return nil
 	}
 
+	// Gate: each poke costs the refinery a full model turn. Only poke when
+	// the queue holds ready, unclaimed work it was not poked about yet (the
+	// same gate gt done / gt mq submit use, so the witness and the polecat
+	// do not both poke for one MR). If the queue cannot be read, fall back
+	// to the content dedupe window.
+	const msg = "New MR available - check merge queue for pending work"
+	if townRoot != "" {
+		if keys, err := refineryReadyWorkKeys(townRoot, rigName); err == nil {
+			if !refinery.ShouldPokeRefinery(townRoot, rigName, keys) {
+				return nil
+			}
+		} else if nudge.RecentlyDelivered(townRoot, sessionName, "", msg) {
+			return nil
+		}
+	}
+
 	// Immediate delivery: send directly to tmux pane.
 	// No cooperative queue — idle agents never call Drain(), so queued
 	// nudges would be stuck forever. Direct delivery is safe: if the
 	// agent is busy, text buffers in tmux and is processed at next prompt.
-	return t.NudgeSession(sessionName, "New MR available - check merge queue for pending work")
+	err = t.NudgeSession(sessionName, msg)
+	if err == nil || errors.Is(err, tmux.ErrSubmitNotVerified) {
+		nudge.RecordDelivered(townRoot, sessionName, "", msg)
+	}
+	return err
 }
+
+// refineryReadyWorkKeys lists the rig's ready, unclaimed MR keys. A var so
+// tests can stub the beads query.
+var refineryReadyWorkKeys = refinery.ReadyWorkKeysForRig
 
 var slotOpenRecoveryCheck = func(workDir, rigName, polecatName string) (string, error) {
 	return util.ExecWithOutput(workDir, "gt", "polecat", "check-recovery", rigName+"/"+polecatName, "--json", "--reconcile-cleanup")

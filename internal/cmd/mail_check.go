@@ -106,8 +106,11 @@ func runMailCheck(cmd *cobra.Command, args []string) error {
 			queuedNudges, drainErr := nudge.Drain(workDir, sessionName)
 			if drainErr != nil {
 				fmt.Fprintf(os.Stderr, "gt mail check: nudge queue drain error: %v\n", drainErr)
-			} else if len(queuedNudges) > 0 {
+			} else if queuedNudges = nudge.DropDuplicates(workDir, sessionName, queuedNudges); len(queuedNudges) > 0 {
+				// Printed hook output is the delivery; record it so a poller,
+				// watcher or repeating sender does not hand it over again.
 				fmt.Print(nudge.FormatForInjection(queuedNudges))
+				nudge.RecordDeliveredNudges(workDir, sessionName, queuedNudges)
 			}
 		}
 

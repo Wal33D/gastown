@@ -146,3 +146,25 @@ func TestErrSubmitNotVerifiedWrapping(t *testing.T) {
 		t.Fatal("errors.Is did not recognize wrapped ErrSubmitNotVerified")
 	}
 }
+
+// A post-typing transport error ("Enter not processed", pane unchanged) must
+// be classified as ErrSubmitNotVerified. It used to escape the class, and the
+// nudge-poller then requeued and retyped a batch the agent already had.
+func TestNotVerifiedClassifiesPostTypingErrors(t *testing.T) {
+	t.Parallel()
+	if notVerified(nil) != nil {
+		t.Fatal("notVerified(nil) should stay nil")
+	}
+	enterErr := fmt.Errorf("nudge Enter not processed after 3 retries: pane content unchanged")
+	got := notVerified(enterErr)
+	if !errors.Is(got, ErrSubmitNotVerified) {
+		t.Fatalf("notVerified(%v) = %v, want ErrSubmitNotVerified", enterErr, got)
+	}
+	if !strings.Contains(got.Error(), "pane content unchanged") {
+		t.Errorf("notVerified lost the original error text: %v", got)
+	}
+	already := fmt.Errorf("x: %w", ErrSubmitNotVerified)
+	if notVerified(already) != already {
+		t.Error("notVerified should not double-wrap")
+	}
+}

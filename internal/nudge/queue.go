@@ -109,6 +109,15 @@ func Enqueue(townRoot, session string, nudge QueuedNudge) error {
 		nudge.Priority = PriorityNormal
 	}
 
+	// Coalesce: if an identical nudge is already waiting for this session,
+	// one pending copy is enough. Senders that repeat while the target is
+	// busy (the deacon's "HEALTH_CHECK from deacon" every patrol, mail
+	// notifications with the same subject) otherwise pile up N copies that
+	// are all delivered together in one QUEUED NUDGE batch.
+	if hasPendingDuplicate(dir, nudge) {
+		return nil
+	}
+
 	// Set expiry if not already specified by the caller.
 	if nudge.ExpiresAt.IsZero() {
 		switch nudge.Priority {
@@ -135,6 +144,38 @@ func Enqueue(townRoot, session string, nudge QueuedNudge) error {
 	}
 
 	return nil
+}
+
+// hasPendingDuplicate reports whether the queue directory already holds an
+// unexpired, unclaimed nudge with the same sender, text, priority, kind and
+// thread. Claimed (.claimed.*) files are in flight and are not considered.
+func hasPendingDuplicate(dir string, n QueuedNudge) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	now := time.Now()
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		var q QueuedNudge
+		if err := json.Unmarshal(data, &q); err != nil {
+			continue
+		}
+		if !q.ExpiresAt.IsZero() && now.After(q.ExpiresAt) {
+			continue // will be discarded at drain; don't let it swallow a fresh copy
+		}
+		if q.Sender == n.Sender && q.Message == n.Message && q.Priority == n.Priority &&
+			q.Kind == n.Kind && q.ThreadID == n.ThreadID {
+			return true
+		}
+	}
+	return false
 }
 
 // Requeue writes previously drained nudges back to the queue for later delivery.

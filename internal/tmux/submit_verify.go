@@ -282,8 +282,14 @@ func (t *Tmux) pollSubmission(target, needle, promptPrefix string, attempts int)
 	return last
 }
 
+// submitComposer runs after the payload has been typed. Every error it
+// returns is classified as ErrSubmitNotVerified: the text is already in the
+// target (and usually submitted or queued by the TUI), so callers must not
+// requeue and retype it. A plain "Enter not processed" error used to escape
+// this classification; the nudge-poller then requeued the batch and the
+// agent received the same nudge again on the next poll.
 func (t *Tmux) submitComposer(target, message, promptPrefix string) error {
-	enterErr := t.sendEnterVerified(target)
+	enterErr := notVerified(t.sendEnterVerified(target))
 	needle := submitNeedle(message)
 	if needle == "" {
 		return enterErr
@@ -301,6 +307,15 @@ func (t *Tmux) submitComposer(target, message, promptPrefix string) error {
 	default:
 		return enterErr
 	}
+}
+
+// notVerified wraps a post-typing transport error as ErrSubmitNotVerified,
+// keeping the original text. nil stays nil.
+func notVerified(err error) error {
+	if err == nil || errors.Is(err, ErrSubmitNotVerified) {
+		return err
+	}
+	return fmt.Errorf("%w (%v)", ErrSubmitNotVerified, err)
 }
 
 func (t *Tmux) recoverStrandedComposer(target, message, needle, promptPrefix string) error {

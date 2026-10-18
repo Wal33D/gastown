@@ -20,6 +20,8 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/formula"
+	"github.com/steveyegge/gastown/internal/nudge"
+	"github.com/steveyegge/gastown/internal/refinery"
 	rigpkg "github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
@@ -919,9 +921,27 @@ func wakeRigAgents(rigName string) {
 	// agent is busy, text buffers in tmux and is processed at next prompt.
 	witnessSession := session.WitnessSessionName(session.PrefixFor(rigName))
 	t := tmux.NewTmux()
-	if err := t.NudgeSession(witnessSession, "Polecat dispatched - check for work"); err != nil {
+	// Deduped: a batch of slings used to wake the witness once per polecat
+	// with the same text; one wake per dedupe window is enough because the
+	// witness discovers every dispatched polecat on its own patrol.
+	if err := pokeSessionDeduped(t, townRoot, witnessSession, "Polecat dispatched - check for work"); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to nudge witness %s: %v\n", witnessSession, err)
 	}
+}
+
+// pokeSessionDeduped sends an unattributed wake-up poke straight to a tmux
+// session unless the same text reached that session within the nudge dedupe
+// window. The poke is recorded once its text was typed (including an
+// unverified submit), so retries and repeated callers coalesce into one turn.
+func pokeSessionDeduped(t *tmux.Tmux, townRoot, sessionName, message string) error {
+	if nudge.RecentlyDelivered(townRoot, sessionName, "", message) {
+		return nil
+	}
+	err := t.NudgeSession(sessionName, message)
+	if nudgeTextTyped(err) {
+		nudge.RecordDelivered(townRoot, sessionName, "", message)
+	}
+	return err
 }
 
 // nudgeWitness wakes the witness after polecat completion (gt-a6gp).
@@ -950,8 +970,9 @@ func nudgeWitness(rigName, message string) {
 		})
 	}
 
+	// Deduped: a re-run of gt done sends the identical POLECAT_DONE line again.
 	t := tmux.NewTmux()
-	if err := t.NudgeSession(witnessSession, message); err != nil {
+	if err := pokeSessionDeduped(t, townRoot, witnessSession, message); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to nudge witness %s: %v\n", witnessSession, err)
 	}
 }
@@ -985,10 +1006,41 @@ func nudgeRefinery(rigName, message string) {
 		})
 	}
 
+	// Each poke costs the refinery a full model turn, so only poke when the
+	// merge queue holds ready, unclaimed work it has not been poked about yet.
+	if !shouldPokeRefinery(townRoot, rigName, refinerySession, message) {
+		return
+	}
+
 	t := tmux.NewTmux()
-	if err := t.NudgeSession(refinerySession, message); err != nil {
+	err := t.NudgeSession(refinerySession, message)
+	if nudgeTextTyped(err) {
+		nudge.RecordDelivered(townRoot, refinerySession, "", message)
+	}
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to nudge refinery %s: %v\n", refinerySession, err)
 	}
+}
+
+// refineryReadyWorkKeys lists the rig's ready, unclaimed MR keys. A var so
+// tests can stub the beads query.
+var refineryReadyWorkKeys = refinery.ReadyWorkKeysForRig
+
+// shouldPokeRefinery decides whether a MERGE_READY poke is worth sending.
+// It pokes only when the queue holds ready, unclaimed work (MR id + commit)
+// that was not ready at the previous check: nothing for an empty queue,
+// nothing for a repeat gt done on an MR that already existed or is already
+// claimed. If the queue cannot be read, it falls back to the plain content
+// dedupe window so a beads outage cannot turn into a poke storm or a stall.
+func shouldPokeRefinery(townRoot, rigName, refinerySession, message string) bool {
+	if townRoot == "" {
+		return true
+	}
+	keys, err := refineryReadyWorkKeys(townRoot, rigName)
+	if err != nil {
+		return !nudge.RecentlyDelivered(townRoot, refinerySession, "", message)
+	}
+	return refinery.ShouldPokeRefinery(townRoot, rigName, keys)
 }
 
 // isPolecatTarget checks if the target string refers to a polecat.

@@ -184,6 +184,14 @@ func deliverNudge(t *tmux.Tmux, sessionName, message, sender string) error {
 	// FormatForInjection adds the prefix, so we must NOT double-prefix.
 	prefixedMessage := fmt.Sprintf("[from %s] %s", sender, message)
 
+	// Idempotent delivery: queue and wait-idle nudges whose exact text from the
+	// same sender already reached this session within the dedupe window are
+	// dropped here. Immediate mode is an explicit break-through and is exempt.
+	if mode != NudgeModeImmediate && nudge.RecentlyDelivered(townRoot, sessionName, sender, message) {
+		fmt.Fprintf(os.Stderr, "nudge: identical nudge already delivered to %s recently; skipping duplicate\n", sessionName)
+		return nil
+	}
+
 	switch mode {
 	case NudgeModeQueue:
 		if townRoot == "" {
@@ -246,16 +254,17 @@ func deliverNudge(t *tmux.Tmux, sessionName, message, sender string) error {
 				Priority: nudgePriorityFlag,
 			}})
 			deliverErr := t.NudgeSessionWithOpts(sessionName, formatted, tmux.NudgeOpts{TownRoot: townRoot})
-			if !errors.Is(deliverErr, tmux.ErrSubmitNotVerified) {
+			if !nudgeTextTyped(deliverErr) {
 				return deliverErr
 			}
-			fmt.Fprintf(os.Stderr, "wait-idle: %v; queueing for %s\n", deliverErr, sessionName)
-			if qErr := nudge.Enqueue(townRoot, sessionName, nudge.QueuedNudge{
-				Sender:   sender,
-				Message:  message,
-				Priority: nudgePriorityFlag,
-			}); qErr != nil {
-				return fmt.Errorf("queue fallback after unverified submit failed: %v (original: %w)", qErr, deliverErr)
+			nudge.RecordDelivered(townRoot, sessionName, sender, message)
+			if deliverErr != nil {
+				// The text was typed and Enter was sent; the probe just could
+				// not prove it left the composer (Grok queues input while a
+				// turn runs). This path used to enqueue the same nudge as a
+				// fallback, so the poller or the next drain delivered it a
+				// second time. Treat it as delivered.
+				fmt.Fprintf(os.Stderr, "wait-idle: %v; not requeueing (text was typed) for %s\n", deliverErr, sessionName)
 			}
 			return nil
 		}
@@ -345,14 +354,18 @@ func watchAndDeliver(t *tmux.Tmux, townRoot, sessionName string) {
 			// If another process raced and drained first, we get an
 			// empty slice and skip delivery to avoid duplicates.
 			drained, _ := nudge.Drain(townRoot, sessionName)
+			drained = nudge.DropDuplicates(townRoot, sessionName, drained)
 			if len(drained) == 0 {
 				return
 			}
 			formatted := nudge.FormatForInjection(drained)
-			if err := t.NudgeSessionWithOpts(sessionName, formatted, tmux.NudgeOpts{TownRoot: townRoot}); err != nil {
+			err := t.NudgeSessionWithOpts(sessionName, formatted, tmux.NudgeOpts{TownRoot: townRoot})
+			if err != nil {
 				fmt.Fprintf(os.Stderr, "idle-watcher: delivery for %s failed: %v\n", sessionName, err)
-				requeueDrainedNudges(townRoot, sessionName, "idle-watcher", drained)
 			}
+			// Requeue only when nothing was typed; an unverified submit used
+			// to be requeued here too and arrived again on the next drain.
+			settleDrainedDelivery(townRoot, sessionName, "idle-watcher", drained, err)
 			return
 		}
 	}

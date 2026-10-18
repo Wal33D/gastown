@@ -1,6 +1,7 @@
 package nudge
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -330,11 +331,12 @@ func TestEnqueueQueueDepthLimit(t *testing.T) {
 	townRoot := t.TempDir()
 	session := "gt-test-depth"
 
-	// Fill the queue to MaxQueueDepth
+	// Fill the queue to MaxQueueDepth (distinct texts: identical pending
+	// nudges are coalesced by Enqueue).
 	for i := 0; i < MaxQueueDepth; i++ {
 		n := QueuedNudge{
 			Sender:  "sender",
-			Message: "msg",
+			Message: fmt.Sprintf("msg-%d", i),
 		}
 		if err := Enqueue(townRoot, session, n); err != nil {
 			t.Fatalf("Enqueue %d: %v", i, err)
@@ -789,5 +791,69 @@ func TestConcurrentDrainNoDoubleDeli(t *testing.T) {
 	// Verify no double-delivery: total must be exactly count, not more.
 	if total > count {
 		t.Errorf("double delivery detected: got %d total nudges, want exactly %d", total, count)
+	}
+}
+
+// TestEnqueueCoalescesIdenticalPending reproduces the HEALTH_CHECK pile-up:
+// the deacon queued "HEALTH_CHECK from deacon" every patrol while the target
+// was busy, and the target later received 2-5 copies in one QUEUED NUDGE
+// batch. Identical pending nudges must coalesce into one queue entry.
+func TestEnqueueCoalescesIdenticalPending(t *testing.T) {
+	townRoot := t.TempDir()
+	session := "gt-test-coalesce"
+
+	for i := 0; i < 4; i++ {
+		if err := Enqueue(townRoot, session, QueuedNudge{Sender: "deacon", Message: "HEALTH_CHECK from deacon"}); err != nil {
+			t.Fatalf("Enqueue %d: %v", i, err)
+		}
+	}
+	// A different text, or the same text from another sender, is not a duplicate.
+	if err := Enqueue(townRoot, session, QueuedNudge{Sender: "deacon", Message: "something else"}); err != nil {
+		t.Fatalf("Enqueue other: %v", err)
+	}
+	if err := Enqueue(townRoot, session, QueuedNudge{Sender: "mayor", Message: "HEALTH_CHECK from deacon"}); err != nil {
+		t.Fatalf("Enqueue other sender: %v", err)
+	}
+
+	if n, _ := Pending(townRoot, session); n != 3 {
+		t.Fatalf("Pending = %d, want 3 (four identical HEALTH_CHECKs coalesced to one)", n)
+	}
+
+	// Once drained, the same text can be queued again.
+	if _, err := Drain(townRoot, session); err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if err := Enqueue(townRoot, session, QueuedNudge{Sender: "deacon", Message: "HEALTH_CHECK from deacon"}); err != nil {
+		t.Fatalf("Enqueue after drain: %v", err)
+	}
+	if n, _ := Pending(townRoot, session); n != 1 {
+		t.Fatalf("Pending after drain+enqueue = %d, want 1", n)
+	}
+}
+
+// TestEnqueueIgnoresExpiredDuplicate makes sure an expired pending copy (which
+// Drain will discard) does not swallow a fresh one.
+func TestEnqueueIgnoresExpiredDuplicate(t *testing.T) {
+	townRoot := t.TempDir()
+	session := "gt-test-coalesce-expired"
+
+	old := QueuedNudge{
+		Sender:    "deacon",
+		Message:   "HEALTH_CHECK from deacon",
+		Timestamp: time.Now().Add(-time.Hour),
+		ExpiresAt: time.Now().Add(-time.Minute),
+	}
+	if err := Enqueue(townRoot, session, old); err != nil {
+		t.Fatalf("Enqueue expired: %v", err)
+	}
+	if err := Enqueue(townRoot, session, QueuedNudge{Sender: "deacon", Message: "HEALTH_CHECK from deacon"}); err != nil {
+		t.Fatalf("Enqueue fresh: %v", err)
+	}
+	got, err := Drain(townRoot, session)
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("Drain got %d nudges, want 1 fresh copy", len(got))
 	}
 }

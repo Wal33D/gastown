@@ -300,6 +300,11 @@ type NudgeThresholds struct {
 	// StaleClaimThreshold is how long a .claimed file must be untouched
 	// before treated as orphan (default "5m").
 	StaleClaimThreshold string `json:"stale_claim_threshold,omitempty"`
+
+	// DedupWindow is how long an identical nudge (same sender and text) to the
+	// same session is suppressed after it was delivered (default "10m").
+	// "0s" disables delivery dedupe.
+	DedupWindow string `json:"dedup_window,omitempty"`
 }
 
 // DaemonThresholds configures daemon lifecycle and patrol thresholds.

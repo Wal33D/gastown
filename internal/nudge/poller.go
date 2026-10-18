@@ -25,6 +25,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -96,6 +97,17 @@ func buildPollerCommand(gtBin, townRoot, session string) *exec.Cmd {
 	cmd.Stderr = nil // discard
 	util.SetDetachedProcessGroup(cmd)
 	return cmd
+}
+
+// AcquirePollerLock takes the per-session single-instance lock held by a
+// running nudge-poller. Returns (unlock, true, nil) when acquired and
+// (nil, false, nil) when another poller already holds it.
+func AcquirePollerLock(townRoot, session string) (func(), bool, error) {
+	if err := os.MkdirAll(pollerPidDir(townRoot), 0755); err != nil {
+		return nil, false, fmt.Errorf("creating poller pid dir: %w", err)
+	}
+	safe := strings.ReplaceAll(session, "/", "_")
+	return lock.FlockTryAcquire(filepath.Join(pollerPidDir(townRoot), safe+".lock"))
 }
 
 // StopPoller terminates the nudge-poller for a session, if running.

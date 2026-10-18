@@ -1657,10 +1657,23 @@ func (r *Router) notifyRecipient(msg *Message) error {
 		// consecutive idle polls (prompt visible + no "esc to interrupt"
 		// in the status bar) to distinguish genuine idle from brief
 		// inter-tool-call gaps. See: https://github.com/steveyegge/gastown/issues/2032
+		// Identical notification text (same sender and subject, e.g. a
+		// stream of "HEALTH_OK refinery" mails) already reached this session
+		// within the nudge dedupe window: the mail itself is in the inbox,
+		// so a second poke only costs the recipient another turn.
+		if r.townRoot != "" && nudge.RecentlyDelivered(r.townRoot, sessionID, msg.From, notification) {
+			notified++
+			continue
+		}
+
 		waitErr := r.tmux.WaitForIdle(sessionID, timeout)
 		if waitErr == nil {
 			// Agent is idle — deliver directly for immediate wakeup.
-			if err := r.tmux.NudgeSession(sessionID, notification); err == nil {
+			err := r.tmux.NudgeSession(sessionID, notification)
+			if err == nil || errors.Is(err, tmux.ErrSubmitNotVerified) {
+				nudge.RecordDelivered(r.townRoot, sessionID, msg.From, notification)
+			}
+			if err == nil {
 				r.enqueueReplyReminder(msg, sessionID)
 				notified++
 				continue
